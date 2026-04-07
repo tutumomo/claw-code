@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -374,7 +374,7 @@ pub fn parse_oauth_callback_query(query: &str) -> Result<OAuthCallbackParams, St
 fn generate_random_token(bytes: usize) -> io::Result<String> {
     let mut buffer = vec![0_u8; bytes];
     getrandom::getrandom(&mut buffer)
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
     Ok(base64url_encode(&buffer))
 }
 
