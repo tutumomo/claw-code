@@ -1,0 +1,74 @@
+unset ANTHROPIC_API_KEY
+unset ANTHROPIC_BASE_URL   
+unset ANTHROPIC_MODEL
+
+export OPENAI_API_KEY="[ENCRYPTION_KEY]"
+export OPENAI_BASE_URL="https://integrate.api.nvidia.com/v1"
+
+cargo run -p rusty-claude-cli -- --model "nvidia/nemotron-3-super-120b-a12b" 
+
+---
+加入多提供商 OAuth 認證系統後，完整的啟動步驟與指令如下：
+
+1. 編譯並安裝最新版本 (Build)
+確保您剛才修改的所有程式碼都已正確編譯。在 macOS 終端機執行：
+
+bash
+cd /Users/tuchengshin/claw-code/rust
+cargo build -p rusty-claude-cli
+
+TIP
+建議將編譯後的執行檔路徑加入 PATH 或建立 alias，方便直接使用 claw 指令： alias claw='/Users/tuchengshin/claw-code/rust/target/debug/claw'
+
+2. 設定 OAuth 提供商資訊 (Configure)
+如果您要使用 OpenAI / NVIDIA 的 OAuth 認證，請先在您的設定檔中定義閘道資訊：
+檔案位置： ~/.claw/settings.json
+
+json
+{
+  "openaiOauth": {
+    "clientId": "您的_CLIENT_ID",
+    "authorizeUrl": "您的_授權頁面_URL",
+    "tokenUrl": "您的_Token交換_URL",
+    "scopes": ["openid", "inference"]
+  }
+}
+
+3. 執行 OAuth 登入 (Login)
+使用新開發的 --provider 參數進行登入。系統會自動開啟瀏覽器引導您完成授權。
+
+bash
+# 針對 OpenAI 相容提供商進行認證
+claw login --provider openai
+完成後，您會看到以下成功訊息：
+
+✅ OpenAI OAuth 登入成功！ Tip: You can now run claw without setting an API key.
+
+4. 啟動大模型進行對話 (Run)
+現在您可以直接啟動模型，系統會優先檢查環境變數，若無則自動使用剛剛登入的 OAuth Token：
+
+bash
+# 清除舊的環境變數（測試 OAuth 是否生效）
+unset OPENAI_API_KEY
+# 啟動 NVIDIA 模型
+claw --model "nvidia/nemotron-3-super-120b-a12b"
+
+5. (備用) 如果您想繼續使用 API Key 認證
+如果您目前沒有 OAuth 閘道，仍然可以使用您原本驗證成功的 API Key 方式：
+
+bash
+# 設定 NVIDIA NIM 環境變數
+export OPENAI_API_KEY="您的_NVAPI_金鑰"
+export OPENAI_BASE_URL="https://integrate.api.nvidia.com/v1"
+# 啟動指令
+claw --model "nvidia/nemotron-3-super-120b-a12b"
+常見管理指令 (Management)
+登出並清除對應憑證：
+bash
+claw logout --provider openai
+檢查系統狀態：
+bash
+claw doctor
+
+IMPORTANT
+本次更新後的 claw login 預設為 anthropic (Claude)。若要認證 NVIDIA 或其他 OpenAI 相容服務，務必加上 --provider openai。

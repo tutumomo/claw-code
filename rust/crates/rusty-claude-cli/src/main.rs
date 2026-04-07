@@ -158,8 +158,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             permission_mode,
         } => LiveCli::new(model, true, allowed_tools, permission_mode)?
             .run_turn_with_output(&prompt, output_format)?,
-        CliAction::Login { output_format } => run_login(output_format)?,
-        CliAction::Logout { output_format } => run_logout(output_format)?,
+        CliAction::Login { output_format, provider } => run_login(&provider, output_format)?,
+        CliAction::Logout { output_format, provider } => run_logout(provider.as_deref(), output_format)?,
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
         CliAction::Repl {
@@ -228,9 +228,11 @@ enum CliAction {
     },
     Login {
         output_format: CliOutputFormat,
+        provider: String,
     },
     Logout {
         output_format: CliOutputFormat,
+        provider: Option<String>,
     },
     Doctor {
         output_format: CliOutputFormat,
@@ -447,8 +449,18 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
         }
         "system-prompt" => parse_system_prompt_args(&rest[1..], output_format),
-        "login" => Ok(CliAction::Login { output_format }),
-        "logout" => Ok(CliAction::Logout { output_format }),
+        "login" => {
+            let provider = parse_provider_from_args(&rest[1..])?;
+            Ok(CliAction::Login { output_format, provider })
+        }
+        "logout" => {
+            let provider = if rest.len() > 1 {
+                Some(parse_provider_from_args(&rest[1..])?)
+            } else {
+                None
+            };
+            Ok(CliAction::Logout { output_format, provider })
+        }
         "init" => Ok(CliAction::Init { output_format }),
         "prompt" => {
             let prompt = rest[1..].join(" ");
@@ -478,6 +490,52 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             permission_mode,
         }),
     }
+}
+
+/// Supported OAuth providers for `login` / `logout`.
+const SUPPORTED_OAUTH_PROVIDERS: &[&str] = &["anthropic", "openai", "xai"];
+
+fn parse_provider_from_args(args: &[String]) -> Result<String, String> {
+    let mut provider = "anthropic".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--provider" => {
+                let value = args.get(i + 1).ok_or_else(|| {
+                    format!(
+                        "missing value for --provider\n\n  支援的提供商 (Supported providers): {}\n  範例 (Example): claw login --provider openai",
+                        SUPPORTED_OAUTH_PROVIDERS.join(", ")
+                    )
+                })?;
+                if !SUPPORTED_OAUTH_PROVIDERS.contains(&value.as_str()) {
+                    return Err(format!(
+                        "不支援的提供商 (Unsupported provider): \"{value}\"\n\n  支援的提供商 (Supported providers): {}\n  範例 (Example): claw login --provider openai",
+                        SUPPORTED_OAUTH_PROVIDERS.join(", ")
+                    ));
+                }
+                provider = value.clone();
+                i += 2;
+            }
+            flag if flag.starts_with("--provider=") => {
+                let value = &flag[11..];
+                if !SUPPORTED_OAUTH_PROVIDERS.contains(&value) {
+                    return Err(format!(
+                        "不支援的提供商 (Unsupported provider): \"{value}\"\n\n  支援的提供商 (Supported providers): {}\n  範例 (Example): claw login --provider openai",
+                        SUPPORTED_OAUTH_PROVIDERS.join(", ")
+                    ));
+                }
+                provider = value.to_string();
+                i += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unexpected argument: {other}\n\n  用法 (Usage): claw login [--provider <provider>]\n  支援的提供商 (Supported providers): {}",
+                    SUPPORTED_OAUTH_PROVIDERS.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(provider)
 }
 
 fn parse_local_help_action(rest: &[String]) -> Option<Result<CliAction, String>> {
@@ -1581,22 +1639,25 @@ fn default_oauth_config() -> OAuthConfig {
     }
 }
 
-fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+fn run_login(provider: &str, output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config = ConfigLoader::default_for(&cwd).load()?;
-    let default_oauth = default_oauth_config();
-    let oauth = config.oauth().unwrap_or(&default_oauth);
+
+    let (oauth, provider_label) = resolve_oauth_config_for_provider(provider, &config)?;
+
     let callback_port = oauth.callback_port.unwrap_or(DEFAULT_OAUTH_CALLBACK_PORT);
     let redirect_uri = runtime::loopback_redirect_uri(callback_port);
     let pkce = generate_pkce_pair()?;
     let state = generate_state()?;
     let authorize_url =
-        OAuthAuthorizationRequest::from_config(oauth, redirect_uri.clone(), state.clone(), &pkce)
+        OAuthAuthorizationRequest::from_config(&oauth, redirect_uri.clone(), state.clone(), &pkce)
             .build_url();
 
     if output_format == CliOutputFormat::Text {
-        println!("Starting Claude OAuth login...");
-        println!("Listening for callback on {redirect_uri}");
+        println!("\n🔐 正在啟動 {provider_label} OAuth 登入...");
+        println!("   Starting {provider_label} OAuth login...\n");
+        println!("   📡 正在監聽回呼 (Listening): {redirect_uri}");
+        println!("   🌐 瀏覽器將自動開啟授權頁面\n");
     }
     if let Err(error) = open_browser(&authorize_url) {
         emit_login_browser_open_failure(
@@ -1608,7 +1669,7 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
         )?;
     }
 
-    let callback = wait_for_oauth_callback(callback_port)?;
+    let callback = wait_for_oauth_callback(callback_port, &provider_label)?;
     if let Some(error) = callback.error {
         let description = callback
             .error_description
@@ -1625,63 +1686,146 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
         return Err(io::Error::new(io::ErrorKind::InvalidData, "oauth state mismatch").into());
     }
 
-    let client = AnthropicClient::from_auth(AuthSource::None).with_base_url(api::read_base_url());
-    let exchange_request = OAuthTokenExchangeRequest::from_config(
-        oauth,
-        code,
-        state,
-        pkce.verifier,
-        redirect_uri.clone(),
-    );
-    let runtime = tokio::runtime::Runtime::new()?;
-    let token_set = runtime.block_on(client.exchange_oauth_code(oauth, &exchange_request))?;
-    save_oauth_credentials(&runtime::OAuthTokenSet {
-        access_token: token_set.access_token,
-        refresh_token: token_set.refresh_token,
-        expires_at: token_set.expires_at,
-        scopes: token_set.scopes,
-    })?;
+    // Token exchange — use provider-specific or generic path
+    let tok_runtime = tokio::runtime::Runtime::new()?;
+    if provider == "anthropic" {
+        // Use existing Anthropic client for token exchange (maintains backward compat)
+        let client = AnthropicClient::from_auth(AuthSource::None).with_base_url(api::read_base_url());
+        let exchange_request = OAuthTokenExchangeRequest::from_config(
+            &oauth,
+            code,
+            state,
+            pkce.verifier,
+            redirect_uri.clone(),
+        );
+        let token_set = tok_runtime.block_on(client.exchange_oauth_code(&oauth, &exchange_request))?;
+        save_oauth_credentials(&runtime::OAuthTokenSet {
+            access_token: token_set.access_token,
+            refresh_token: token_set.refresh_token,
+            expires_at: token_set.expires_at,
+            scopes: token_set.scopes,
+        })?;
+    } else {
+        // Generic OAuth token exchange for OpenAI-compatible providers
+        let exchange_request = OAuthTokenExchangeRequest::from_config(
+            &oauth,
+            code,
+            state,
+            pkce.verifier,
+            redirect_uri.clone(),
+        );
+        let token_response = tok_runtime.block_on(
+            api::exchange_oauth_code(&oauth.token_url, &exchange_request.form_params())
+        )?;
+        let expires_at = token_response.resolved_expires_at();
+        let scopes = token_response.scopes_vec();
+        runtime::save_oauth_credentials_for(provider, &runtime::OAuthTokenSet {
+            access_token: token_response.access_token,
+            refresh_token: token_response.refresh_token,
+            expires_at,
+            scopes,
+        })?;
+    }
+
     match output_format {
-        CliOutputFormat::Text => println!("Claude OAuth login complete."),
+        CliOutputFormat::Text => {
+            println!("\n✅ {provider_label} OAuth 登入成功！");
+            println!("   {provider_label} OAuth login complete.\n");
+            if provider != "anthropic" {
+                println!("   💡 提示：現在您可以直接執行 claw 而無需設定 API Key。");
+                println!("   Tip: You can now run claw without setting an API key.\n");
+            }
+        }
         CliOutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "kind": "login",
+                "provider": provider,
                 "callback_port": callback_port,
                 "redirect_uri": redirect_uri,
-                "message": "Claude OAuth login complete.",
+                "message": format!("{provider_label} OAuth login complete."),
             }))?
         ),
     }
     Ok(())
 }
 
-fn emit_login_browser_open_failure(
-    output_format: CliOutputFormat,
-    authorize_url: &str,
-    error: &io::Error,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> io::Result<()> {
-    writeln!(
-        stderr,
-        "warning: failed to open browser automatically: {error}"
-    )?;
-    match output_format {
-        CliOutputFormat::Text => writeln!(stdout, "Open this URL manually:\n{authorize_url}"),
-        CliOutputFormat::Json => writeln!(stderr, "Open this URL manually:\n{authorize_url}"),
+/// Resolve the OAuth config for a given provider, with beginner-friendly error messages.
+fn resolve_oauth_config_for_provider(
+    provider: &str,
+    config: &runtime::RuntimeConfig,
+) -> Result<(OAuthConfig, String), Box<dyn std::error::Error>> {
+    match provider {
+        "anthropic" => {
+            let default = default_oauth_config();
+            let oauth = config.oauth().cloned().unwrap_or(default);
+            Ok((oauth, "Claude (Anthropic)".to_string()))
+        }
+        "openai" => {
+            if let Some(oauth) = config.openai_oauth() {
+                Ok((oauth.clone(), "OpenAI".to_string()))
+            } else {
+                Err(format!(
+                    "\n❌ 找不到 OpenAI OAuth 設定。\n   OpenAI OAuth configuration not found.\n\n\
+                     📝 請在 settings.json 中新增以下設定 (Please add to settings.json):\n\n\
+                     📂 檔案位置 (File location): ~/.claw/settings.json\n\n\
+                     {}\n\n\
+                     📌 說明 (Notes):\n\
+                     ├─ clientId:     您的 OAuth 應用程式 ID (Your OAuth application ID)\n\
+                     ├─ authorizeUrl: OAuth 授權頁面 URL (Authorization endpoint)\n\
+                     ├─ tokenUrl:     Token 交換 URL (Token exchange endpoint)\n\
+                     ├─ callbackPort: 本地回呼埠號 (Local callback port, 預設 4546)\n\
+                     └─ scopes:       權限範圍 (Permission scopes)\n\n\
+                     💡 提示：如果您使用的是 OpenAI API Key，\n\
+                        只需要設定 OPENAI_API_KEY 環境變數即可，不需要 OAuth。\n\
+                     Tip: If you use a plain OpenAI API key,\n\
+                        just export OPENAI_API_KEY — no OAuth needed.",
+                    serde_json::to_string_pretty(&json!({
+                        "openaiOauth": {
+                            "clientId": "<YOUR_CLIENT_ID>",
+                            "authorizeUrl": "https://your-oauth-server.com/authorize",
+                            "tokenUrl": "https://your-oauth-server.com/token",
+                            "callbackPort": 4546,
+                            "scopes": ["openid", "inference"]
+                        }
+                    }))?
+                ).into())
+            }
+        }
+        "xai" => {
+            // xAI currently uses API keys; provide guidance
+            Err("\n❌ xAI (Grok) 目前不提供 OAuth 授權。\n   xAI (Grok) does not offer OAuth authorization yet.\n\n\
+                 💡 請使用 API Key 方式：\n\
+                    export XAI_API_KEY=\"your-xai-api-key\"\n\n\
+                 📌 如果您有自建的 OAuth 網關代理 xAI 存取，\n\
+                    請將 OAuth 設定加入 settings.json 的 \"openaiOauth\" 區段。".into())
+        }
+        _ => Err(format!("unsupported provider: {provider}").into()),
     }
 }
 
-fn run_logout(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
-    clear_oauth_credentials()?;
+fn run_logout(provider: Option<&str>, output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    let label = match provider {
+        Some("anthropic") | None => {
+            clear_oauth_credentials()?;
+            "Claude (Anthropic)"
+        }
+        Some(p) => {
+            runtime::clear_oauth_credentials_for(p)?;
+            p
+        }
+    };
     match output_format {
-        CliOutputFormat::Text => println!("Claude OAuth credentials cleared."),
+        CliOutputFormat::Text => {
+            println!("\n🗑️  {label} OAuth 憑證已清除。");
+            println!("   {label} OAuth credentials cleared.\n");
+        }
         CliOutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "kind": "logout",
-                "message": "Claude OAuth credentials cleared.",
+                "provider": provider.unwrap_or("anthropic"),
+                "message": format!("{label} OAuth credentials cleared."),
             }))?
         ),
     }
@@ -1709,8 +1853,29 @@ fn open_browser(url: &str) -> io::Result<()> {
     ))
 }
 
+fn emit_login_browser_open_failure(
+    output_format: CliOutputFormat,
+    authorize_url: &str,
+    error: &io::Error,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "⚠️  無法自動開啟瀏覽器 (Failed to open browser): {error}"
+    )?;
+    match output_format {
+        CliOutputFormat::Text => {
+            writeln!(stdout, "\n📋 請手動開啟以下連結 (Open this URL manually):\n")?;
+            writeln!(stdout, "   {authorize_url}\n")
+        }
+        CliOutputFormat::Json => writeln!(stderr, "Open this URL manually:\n{authorize_url}"),
+    }
+}
+
 fn wait_for_oauth_callback(
     port: u16,
+    provider_label: &str,
 ) -> Result<runtime::OAuthCallbackParams, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let (mut stream, _) = listener.accept()?;
@@ -1729,9 +1894,9 @@ fn wait_for_oauth_callback(
     let callback = parse_oauth_callback_request_target(target)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let body = if callback.error.is_some() {
-        "Claude OAuth login failed. You can close this window."
+        format!("{provider_label} OAuth login failed. You can close this window.")
     } else {
-        "Claude OAuth login succeeded. You can close this window."
+        format!("{provider_label} OAuth login succeeded. You can close this window.")
     };
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -5571,7 +5736,7 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
 
 struct AnthropicRuntimeClient {
     runtime: tokio::runtime::Runtime,
-    client: AnthropicClient,
+    client: api::ProviderClient,
     session_id: String,
     model: String,
     enable_tools: bool,
@@ -5591,10 +5756,10 @@ impl AnthropicRuntimeClient {
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let auth = resolve_cli_auth_source().ok();
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
-            client: AnthropicClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url())
+            client: api::ProviderClient::from_model_with_anthropic_auth(&model, auth)?
                 .with_prompt_cache(PromptCache::new(session_id)),
             session_id: session_id.to_string(),
             model,
@@ -6550,7 +6715,7 @@ fn response_to_events(
     Ok(events)
 }
 
-fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
+fn push_prompt_cache_record(client: &api::ProviderClient, events: &mut Vec<AssistantEvent>) {
     if let Some(record) = client.take_last_prompt_cache_record() {
         if let Some(event) = prompt_cache_record_to_runtime_event(record) {
             events.push(AssistantEvent::PromptCache(event));
@@ -7546,12 +7711,14 @@ mod tests {
             parse_args(&["login".to_string()]).expect("login should parse"),
             CliAction::Login {
                 output_format: CliOutputFormat::Text,
+                provider: "anthropic".to_string(),
             }
         );
         assert_eq!(
             parse_args(&["logout".to_string()]).expect("logout should parse"),
             CliAction::Logout {
                 output_format: CliOutputFormat::Text,
+                provider: None,
             }
         );
         assert_eq!(
@@ -9056,7 +9223,7 @@ UU conflicted.rs",
 
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).expect("utf8");
-        assert!(stderr.contains("failed to open browser automatically"));
+        assert!(stderr.contains("Failed to open browser"));
         assert!(stderr.contains("Open this URL manually:"));
         assert!(stderr.contains("https://example.test/oauth/authorize"));
     }

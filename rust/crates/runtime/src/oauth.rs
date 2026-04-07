@@ -298,6 +298,53 @@ pub fn clear_oauth_credentials() -> io::Result<()> {
     write_credentials_root(&path, &root)
 }
 
+/// Returns the JSON key used to store OAuth credentials for a given provider.
+/// Anthropic uses `"oauth"` for backward compatibility; other providers use `"oauth_{provider}"`.
+fn oauth_credentials_key(provider: &str) -> String {
+    match provider {
+        "anthropic" => "oauth".to_string(),
+        other => format!("oauth_{other}"),
+    }
+}
+
+/// Load OAuth credentials for a specific provider from the shared credentials file.
+pub fn load_oauth_credentials_for(provider: &str) -> io::Result<Option<OAuthTokenSet>> {
+    let path = credentials_path()?;
+    let root = read_credentials_root(&path)?;
+    let key = oauth_credentials_key(provider);
+    let Some(oauth) = root.get(&key) else {
+        return Ok(None);
+    };
+    if oauth.is_null() {
+        return Ok(None);
+    }
+    let stored = serde_json::from_value::<StoredOAuthCredentials>(oauth.clone())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(Some(stored.into()))
+}
+
+/// Save OAuth credentials for a specific provider to the shared credentials file.
+pub fn save_oauth_credentials_for(provider: &str, token_set: &OAuthTokenSet) -> io::Result<()> {
+    let path = credentials_path()?;
+    let mut root = read_credentials_root(&path)?;
+    let key = oauth_credentials_key(provider);
+    root.insert(
+        key,
+        serde_json::to_value(StoredOAuthCredentials::from(token_set.clone()))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+    );
+    write_credentials_root(&path, &root)
+}
+
+/// Clear OAuth credentials for a specific provider from the shared credentials file.
+pub fn clear_oauth_credentials_for(provider: &str) -> io::Result<()> {
+    let path = credentials_path()?;
+    let mut root = read_credentials_root(&path)?;
+    let key = oauth_credentials_key(provider);
+    root.remove(&key);
+    write_credentials_root(&path, &root)
+}
+
 pub fn parse_oauth_callback_request_target(target: &str) -> Result<OAuthCallbackParams, String> {
     let (path, query) = target
         .split_once('?')

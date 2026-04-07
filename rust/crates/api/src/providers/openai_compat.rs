@@ -101,6 +101,27 @@ impl OpenAiCompatClient {
         Ok(Self::new(api_key, config))
     }
 
+    /// Try to create the client from environment variables first; if no API key is set,
+    /// fall back to loading a saved OAuth token for the given provider.
+    pub fn from_env_or_oauth(config: OpenAiCompatConfig, provider: &str) -> Result<Self, ApiError> {
+        // 1. Try env var first
+        if let Some(api_key) = read_env_non_empty(config.api_key_env)? {
+            return Ok(Self::new(api_key, config));
+        }
+
+        // 2. Fall back to saved OAuth token
+        let token_set = runtime::load_oauth_credentials_for(provider)
+            .map_err(ApiError::from)?;
+        if let Some(token_set) = token_set {
+            return Ok(Self::new(token_set.access_token, config));
+        }
+
+        Err(ApiError::missing_credentials(
+            config.provider_name,
+            config.credential_env_vars(),
+        ))
+    }
+
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
@@ -215,6 +236,73 @@ impl OpenAiCompatClient {
             .checked_mul(multiplier)
             .map_or(self.max_backoff, |delay| delay.min(self.max_backoff)))
     }
+}
+
+/// Standard OAuth 2.0 token response, compatible with most providers.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OAuthTokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    /// Token lifetime in seconds (standard OAuth field).
+    pub expires_in: Option<u64>,
+    /// Absolute expiry timestamp (non-standard but used by some providers).
+    pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub token_type: Option<String>,
+}
+
+impl OAuthTokenResponse {
+    /// Compute absolute expiry from `expires_in` if `expires_at` was not present.
+    #[must_use]
+    pub fn resolved_expires_at(&self) -> Option<u64> {
+        self.expires_at.or_else(|| {
+            self.expires_in.map(|seconds| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+                    + seconds
+            })
+        })
+    }
+
+    /// Parse scopes from the space-delimited `scope` string.
+    #[must_use]
+    pub fn scopes_vec(&self) -> Vec<String> {
+        self.scope
+            .as_deref()
+            .map(|s| s.split_whitespace().map(String::from).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Exchange an OAuth authorization code for tokens using the standard token endpoint.
+/// This is provider-agnostic and works with any OAuth 2.0 server.
+pub async fn exchange_oauth_code(
+    token_url: &str,
+    params: &std::collections::BTreeMap<&str, String>,
+) -> Result<OAuthTokenResponse, ApiError> {
+    let http = reqwest::Client::new();
+    let response = http
+        .post(token_url)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .form(params)
+        .send()
+        .await
+        .map_err(ApiError::from)?;
+    let response = expect_success(response).await?;
+    response
+        .json::<OAuthTokenResponse>()
+        .await
+        .map_err(ApiError::from)
+}
+
+/// Refresh an OAuth token using the standard token endpoint.
+pub async fn refresh_oauth_token(
+    token_url: &str,
+    params: &std::collections::BTreeMap<&str, String>,
+) -> Result<OAuthTokenResponse, ApiError> {
+    exchange_oauth_code(token_url, params).await
 }
 
 impl Provider for OpenAiCompatClient {

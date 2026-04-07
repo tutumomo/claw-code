@@ -25,14 +25,16 @@ impl ProviderClient {
         let resolved_model = providers::resolve_model_alias(model);
         match providers::detect_provider_kind(&resolved_model) {
             ProviderKind::Anthropic => Ok(Self::Anthropic(match anthropic_auth {
-                Some(auth) => AnthropicClient::from_auth(auth),
+                Some(auth) => AnthropicClient::from_auth(auth).with_base_url(crate::providers::anthropic::read_base_url()),
                 None => AnthropicClient::from_env()?,
             })),
-            ProviderKind::Xai => Ok(Self::Xai(OpenAiCompatClient::from_env(
+            ProviderKind::Xai => Ok(Self::Xai(OpenAiCompatClient::from_env_or_oauth(
                 OpenAiCompatConfig::xai(),
+                "xai",
             )?)),
-            ProviderKind::OpenAi => Ok(Self::OpenAi(OpenAiCompatClient::from_env(
+            ProviderKind::OpenAi => Ok(Self::OpenAi(OpenAiCompatClient::from_env_or_oauth(
                 OpenAiCompatConfig::openai(),
+                "openai",
             )?)),
         }
     }
@@ -123,6 +125,7 @@ impl MessageStream {
 pub use anthropic::{
     oauth_token_is_expired, resolve_saved_oauth_token, resolve_startup_auth_source, OAuthTokenSet,
 };
+pub use openai_compat::{exchange_oauth_code, refresh_oauth_token, OAuthTokenResponse};
 #[must_use]
 pub fn read_base_url() -> String {
     anthropic::read_base_url()

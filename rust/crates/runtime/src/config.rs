@@ -57,6 +57,7 @@ pub struct RuntimeFeatureConfig {
     plugins: RuntimePluginConfig,
     mcp: McpConfigCollection,
     oauth: Option<OAuthConfig>,
+    openai_oauth: Option<OAuthConfig>,
     model: Option<String>,
     permission_mode: Option<ResolvedPermissionMode>,
     permission_rules: RuntimePermissionRuleConfig,
@@ -279,6 +280,7 @@ impl ConfigLoader {
                 servers: mcp_servers,
             },
             oauth: parse_optional_oauth_config(&merged_value, "merged settings.oauth")?,
+            openai_oauth: parse_optional_oauth_config_key(&merged_value, "openaiOauth", "merged settings.openaiOauth")?,
             model: parse_optional_model(&merged_value),
             permission_mode: parse_optional_permission_mode(&merged_value)?,
             permission_rules: parse_optional_permission_rules(&merged_value)?,
@@ -349,6 +351,11 @@ impl RuntimeConfig {
     }
 
     #[must_use]
+    pub fn openai_oauth(&self) -> Option<&OAuthConfig> {
+        self.feature_config.openai_oauth.as_ref()
+    }
+
+    #[must_use]
     pub fn model(&self) -> Option<&str> {
         self.feature_config.model.as_deref()
     }
@@ -400,6 +407,11 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn oauth(&self) -> Option<&OAuthConfig> {
         self.oauth.as_ref()
+    }
+
+    #[must_use]
+    pub fn openai_oauth(&self) -> Option<&OAuthConfig> {
+        self.openai_oauth.as_ref()
     }
 
     #[must_use]
@@ -791,7 +803,15 @@ fn parse_optional_oauth_config(
     root: &JsonValue,
     context: &str,
 ) -> Result<Option<OAuthConfig>, ConfigError> {
-    let Some(oauth_value) = root.as_object().and_then(|object| object.get("oauth")) else {
+    parse_optional_oauth_config_key(root, "oauth", context)
+}
+
+fn parse_optional_oauth_config_key(
+    root: &JsonValue,
+    key: &str,
+    context: &str,
+) -> Result<Option<OAuthConfig>, ConfigError> {
+    let Some(oauth_value) = root.as_object().and_then(|object| object.get(key)) else {
         return Ok(None);
     };
     let object = expect_object(oauth_value, context)?;
