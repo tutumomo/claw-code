@@ -45,20 +45,33 @@ The canonical implementation lives in [`rust/`](./rust), and the current source 
 
 ## Quick start
 
+### macOS / Linux / WSL
+The easiest way to manage the project is using [just](https://github.com/casey/just).
+
 ```bash
 cd rust
-cargo build --workspace
-./target/debug/claw --help
-./target/debug/claw prompt "summarize this repository"
+# Build and run
+just run --help
+# Run tests
+just test
 ```
 
-Authenticate with either an API key or the built-in OAuth flow:
+### Windows (Native)
+Run the setup script to prepare your environment (PowerShell):
+```powershell
+.\setup.ps1
+cd rust
+just build
+```
+
+Authenticate with either an API key (via `.env`) or the built-in OAuth flow:
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-# or
+# Copy template and edit keys
+cp rust/.env.template rust/.env
+# Or use login
 cd rust
-./target/debug/claw login
+just login
 ```
 
 Run the workspace test suite:

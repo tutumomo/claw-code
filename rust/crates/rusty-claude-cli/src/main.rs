@@ -1838,7 +1838,7 @@ fn open_browser(url: &str) -> io::Result<()> {
     } else if cfg!(target_os = "windows") {
         vec![("cmd", vec!["/C", "start", "", url])]
     } else {
-        vec![("xdg-open", vec![url])]
+        vec![("wslview", vec![url]), ("xdg-open", vec![url])]
     };
     for (program, args) in commands {
         match Command::new(program).args(args).spawn() {

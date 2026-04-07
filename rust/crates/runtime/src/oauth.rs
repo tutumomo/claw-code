@@ -373,7 +373,8 @@ pub fn parse_oauth_callback_query(query: &str) -> Result<OAuthCallbackParams, St
 
 fn generate_random_token(bytes: usize) -> io::Result<String> {
     let mut buffer = vec![0_u8; bytes];
-    File::open("/dev/urandom")?.read_exact(&mut buffer)?;
+    getrandom::getrandom(&mut buffer)
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
     Ok(base64url_encode(&buffer))
 }
 
@@ -381,9 +382,9 @@ fn credentials_home_dir() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAW_CONFIG_HOME") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".claw"))
+    dirs::home_dir()
+        .map(|home| home.join(".claw"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))
 }
 
 fn read_credentials_root(path: &PathBuf) -> io::Result<Map<String, Value>> {

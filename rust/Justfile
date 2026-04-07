@@ -1,0 +1,29 @@
+# claw-code cross-platform task runner
+# Use 'just [recipe]' to run commands
+
+set shell := ["sh", "-c"]
+
+# Build the main CLI
+build:
+    cargo build -p rusty-claude-cli
+
+# Run the CLI with optional arguments (e.g. just run --model ...)
+run *args:
+    cargo run -p rusty-claude-cli -- {{args}}
+
+# Run all tests in the workspace
+test:
+    cargo test
+
+# Run mock parity harness tests
+mock-parity:
+    cargo test -p rusty-claude-cli --test mock_parity_harness -- --nocapture
+
+# Execute OAuth login for a specific provider (default: anthropic)
+login provider="anthropic":
+    cargo run -p rusty-claude-cli -- login --provider {{provider}}
+
+# (Optional) Setup environment
+setup:
+    @echo "Installing development dependencies..."
+    # Placeholder for setup tasks like installing 'just' itself on other platforms
